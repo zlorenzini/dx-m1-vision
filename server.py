@@ -1,7 +1,7 @@
 """server.py — phone web app for the DEEPX DX-M1.
 
-Run with the DX-RT Python (the venv that has dx_engine):
-    venv-dx-runtime/bin/python3 server.py [--port 8090]
+Run with the DX-RT Python (the venv that has dx_engine). `python3 install.py` sets this up:
+    <dx-rt-python> server.py [--port 8090] [--self-test]
 
 Standard library only (plus the cv2/numpy/dx_engine that DX-RT already has).
 
@@ -29,11 +29,14 @@ from urllib.parse import parse_qs, urlparse
 
 import cv2
 
+import config
 import engine
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = config.HERE
 STATIC = os.path.join(HERE, "static")
-WORK = os.environ.get("DXAPP_WORK", os.path.join(HERE, "work"))
+WORK = os.environ.get("DXAPP_WORK") or config.load_file_config().get("work_dir") or os.path.join(HERE, "work")
+FFMPEG = config.ffmpeg_path()
+H264 = None  # resolved at startup
 MAX_UPLOAD = 400 * 1024 * 1024
 MAX_SECONDS = 10.0
 MAX_FPS = 30.0
@@ -82,7 +85,9 @@ def process_image(job, jdir):
     if img is None:
         # e.g. HEIC: let ffmpeg convert it
         conv = os.path.join(jdir, "conv.png")
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", job["src"], "-frames:v", "1", conv],
+        if not FFMPEG:
+            raise ValueError("Could not read that image format (install ffmpeg for HEIC support).")
+        subprocess.run([FFMPEG, "-v", "error", "-y", "-i", job["src"], "-frames:v", "1", conv],
                        check=False, timeout=60)
         img = cv2.imread(conv, cv2.IMREAD_COLOR)
     if img is None:
@@ -98,6 +103,8 @@ def process_image(job, jdir):
 
 
 def process_video(job, jdir):
+    if not FFMPEG or not H264:
+        raise RuntimeError("Video needs ffmpeg with an H.264 encoder on the server. Run install.py to check.")
     cap = cv2.VideoCapture(job["src"])  # FFmpeg backend auto-rotates phone video
     if not cap.isOpened():
         raise ValueError("Could not read that video format.")
@@ -128,11 +135,11 @@ def process_video(job, jdir):
             if enc is None:
                 h, w = frame.shape[:2]
                 enc = subprocess.Popen(
-                    ["ffmpeg", "-v", "error", "-y",
+                    [FFMPEG, "-v", "error", "-y",
                      "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}", "-r", f"{out_fps:.4f}",
                      "-i", "-", "-i", job["src"],
                      "-map", "0:v", "-map", "1:a?", "-t", str(MAX_SECONDS), "-shortest",
-                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+                     "-c:v", H264, *config.encoder_args(H264), "-pix_fmt", "yuv420p",
                      "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out],
                     stdin=subprocess.PIPE, stderr=subprocess.PIPE)
             rows, ms = runner.infer(job["mode"], frame, job["conf"])
@@ -249,7 +256,8 @@ class Handler(BaseHTTPRequestHandler):
         if p in ("/", "/index.html"):
             return self.send_file(os.path.join(STATIC, "index.html"), "text/html; charset=utf-8")
         if p == "/api/modes":
-            return self.send_json({"modes": engine.available_modes(), "maxSeconds": MAX_SECONDS})
+            return self.send_json({"modes": engine.available_modes(), "maxSeconds": MAX_SECONDS,
+                                   "video": bool(FFMPEG and H264)})
         if p.startswith("/api/jobs/"):
             parts = p.split("/")[3:]
             with jobs_lock:
@@ -277,6 +285,8 @@ class Handler(BaseHTTPRequestHandler):
             conf = 0.35
         if kind not in ("image", "video"):
             return self.send_json({"error": "kind must be image or video"}, 400)
+        if kind == "video" and not (FFMPEG and H264):
+            return self.send_json({"error": "Video is disabled: the server has no ffmpeg H.264 encoder."}, 503)
         if mode not in {m["id"] for m in engine.available_modes()}:
             return self.send_json({"error": f"Unknown mode {mode!r}"}, 400)
         length = int(self.headers.get("Content-Length") or 0)
@@ -303,18 +313,61 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(public(job), 202)
 
 
+def self_test():
+    """Run every available mode once on a synthetic image; print JSON; exit 0 if all OK."""
+    import numpy as np
+    img = np.full((480, 640, 3), 128, np.uint8)
+    cv2.rectangle(img, (200, 80), (440, 420), (60, 90, 200), -1)
+    report = {"model_dir": engine.MODEL_DIR, "ffmpeg": FFMPEG, "h264_encoder": H264, "modes": {}}
+    try:
+        from dx_engine import Configuration
+        report["dxrt_version"] = Configuration().get_version()
+    except Exception as e:
+        report["dxrt_version"] = f"unknown ({e})"
+    ok = bool(engine.available_modes())
+    for m in engine.available_modes():
+        try:
+            runner.infer(m["id"], img, 0.5)
+            t = time.perf_counter()
+            for _ in range(3):
+                _, ms = runner.infer(m["id"], img, 0.5)
+            report["modes"][m["id"]] = {"ok": True, "npu_ms": round(ms, 1),
+                                        "wall_ms": round((time.perf_counter() - t) / 3 * 1000, 1)}
+        except Exception as e:
+            ok = False
+            report["modes"][m["id"]] = {"ok": False, "error": str(e)}
+    report["ok"] = ok
+    print(json.dumps(report, indent=2))
+    return 0 if ok else 1
+
+
 def main():
+    global H264
+    cfg = config.load_file_config()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="0.0.0.0")
-    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8090)))
+    ap.add_argument("--host", default=os.environ.get("HOST") or cfg.get("host", "0.0.0.0"))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT") or cfg.get("port", 8090)))
+    ap.add_argument("--self-test", action="store_true", help="test inference on every mode and exit")
     args = ap.parse_args()
+    H264 = config.h264_encoder(FFMPEG)
+    if args.self_test:
+        raise SystemExit(self_test())
+
+    modes = [m["id"] for m in engine.available_modes()]
+    if not modes:
+        print(f"WARNING: no models found in {engine.MODEL_DIR}. Run install.py.", flush=True)
+    if not H264:
+        print("WARNING: no ffmpeg H.264 encoder found; photos work, video is disabled.", flush=True)
     shutil.rmtree(WORK, ignore_errors=True)
     os.makedirs(WORK, exist_ok=True)
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=janitor, daemon=True).start()
-    print(f"DX-M1 phone app on http://{args.host}:{args.port}  modes: "
-          f"{[m['id'] for m in engine.available_modes()]}", flush=True)
-    ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
+    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"DX-M1 Vision  modes={modes}  models={engine.MODEL_DIR}  video={H264 or 'off'}", flush=True)
+    hosts = config.lan_addresses() if args.host in ("0.0.0.0", "") else [args.host]
+    for h in hosts:
+        print(f"  Open on your phone: http://{h}:{args.port}", flush=True)
+    httpd.serve_forever()
 
 
 if __name__ == "__main__":

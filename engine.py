@@ -14,10 +14,9 @@ import cv2
 import numpy as np
 from dx_engine import InferenceEngine
 
-MODEL_DIR = os.environ.get(
-    "DX_MODEL_DIR",
-    "/mnt/jumpdata/accelerators/dx_m1/dx-runtime/dx_app/assets/models/models-2_2_0",
-)
+import config
+
+MODEL_DIR = config.find_model_dir() or os.path.join(config.HERE, "models")
 
 # id -> (label, description, kind, model file)
 MODES = {
@@ -79,8 +78,13 @@ class Runner:
 
     def _engine(self, mode):
         if mode not in self._engines:
-            fname = MODES[mode][3]
-            self._engines[mode] = InferenceEngine(os.path.join(MODEL_DIR, fname))
+            path = os.path.join(MODEL_DIR, MODES[mode][3])
+            try:
+                self._engines[mode] = InferenceEngine(path)
+            except Exception as e:
+                raise RuntimeError(
+                    f"DX-RT could not load {os.path.basename(path)}: {e}. YOLO26 models need "
+                    "DX-RT 3.0+ built with USE_ORT=ON and model zoo 2.2.0+.") from e
         return self._engines[mode]
 
     def infer(self, mode, img_bgr, conf):

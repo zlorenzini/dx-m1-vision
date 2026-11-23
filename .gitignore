@@ -2,3 +2,8 @@ work/
 __pycache__/
 *.pyc
 .venv/
+config.json
+models/
+run-server.sh
+run-server.bat
+dx-m1-vision.service

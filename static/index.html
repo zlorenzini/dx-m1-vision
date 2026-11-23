@@ -178,6 +178,10 @@ async function loadModes() {
       b.onclick = () => { state.mode = m.id; localStorage.setItem("dx-mode", m.id); paintModes(); };
       box.appendChild(b);
     }
+    if (j.video === false) {
+      $("kind-video").disabled = true;
+      $("kind-video").textContent = "Video (server has no ffmpeg)";
+    }
     if (!j.modes.length) box.innerHTML = `<span class="err">No models found on the server.</span>`;
     paintModes();
   } catch (e) {
