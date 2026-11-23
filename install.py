@@ -108,7 +108,7 @@ def step_python():
         "     then rerun, or point at it:  python3 install.py --python /path/to/venv/bin/python3")
     if cands:
         say("     Checked: " + ", ".join(cands))
-    sys.exit(1)
+    return None
 
 
 def step_cv(info):
@@ -149,7 +149,7 @@ def step_device():
             ok(f"dxrt-cli: {line}")
 
 
-def step_ffmpeg():
+def step_ffmpeg(offer_install=True):
     say("\n3. ffmpeg (needed for video, optional for photos)")
     ff = config.ffmpeg_path()
     if not ff:
@@ -163,7 +163,9 @@ def step_ffmpeg():
             hint = ["sudo", "dnf", "install", "-y", "ffmpeg"]
         elif shutil.which("pacman"):
             hint = ["sudo", "pacman", "-S", "--noconfirm", "ffmpeg"]
-        if hint and ask(f"Install it now with: {' '.join(hint)} ?"):
+        if not offer_install and hint:
+            say(f"     Install with: {' '.join(hint)}")
+        elif hint and ask(f"Install it now with: {' '.join(hint)} ?"):
             run(hint)
             ff = shutil.which("ffmpeg")
             if not ff and config.IS_WINDOWS:
@@ -341,10 +343,14 @@ def main():
 
     say(f"DX-M1 Vision installer  ({platform.system()} {platform.machine()}, {config.HERE})")
     info = step_python()
-    step_cv(info)
-    py = info["exe"]
+    if info:
+        step_cv(info)
     step_device()
-    ff, enc = step_ffmpeg()
+    ff, enc = step_ffmpeg(offer_install=bool(info))
+    if not info:
+        say("\nStopped: DX-RT (dx_engine) is required. Fix the items above and rerun install.py.")
+        sys.exit(1)
+    py = info["exe"]
     model_dir = step_models()
 
     cfg = config.load_file_config()
