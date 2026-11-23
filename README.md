@@ -23,6 +23,9 @@ machine with the DX-M1, and get it back with **bounding boxes** (object detectio
 - **ffmpeg** for video. Photos work without it, and the installer offers to install it.
 - Python 3.8+ to run the installer.
 
+Tested with: Raspberry Pi CM5 + DX-M1 (Debian 13, Python 3.13, DX-RT 3.2.0), and x86_64 Linux (Python 3.14,
+ffmpeg 8, with a mock NPU). Reports from x86 machines with a real DX-M1 are welcome.
+
 ## Install
 
 ```bash
@@ -36,7 +39,9 @@ The installer:
 1. finds the Python that has `dx_engine` (it searches the usual DX-RT locations; to choose one yourself, use `--python /path/to/venv/bin/python3`)
 2. checks OpenCV and numpy in that environment, and offers to `pip install opencv-python-headless` if either is missing
 3. checks for the DX-M1 device and for ffmpeg with an H.264 encoder (libx264, OpenH264, NVENC or Media Foundation)
-4. finds the YOLO26 models. If they're missing, it streams DEEPX's public model zoo archive and keeps only the four files it needs (or use `--model-dir`)
+4. finds the YOLO26 models. If they're missing, it streams DEEPX's public model zoo archive and keeps only the four files it needs (or use `--model-dir`).
+   The full archive is 1.8 GB and has to be read all the way through. On a slow connection this can take
+   20+ minutes. If you already have the model zoo from DEEPX's `setup_sample_models.sh`, the installer finds it and skips the download
 5. writes `config.json`, then runs a **self-test of every mode on the NPU**
 6. optionally sets the server to start at boot: a **systemd** service on Linux, or a **logon task** on Windows
 
